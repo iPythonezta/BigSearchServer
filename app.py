@@ -1,0 +1,93 @@
+"""
+BigSearch Server - Main Application Entry Point
+
+A Flask-based REST API server for the BigSearch search engine.
+Provides endpoints for searching, autocomplete, and document indexing.
+"""
+import logging
+from flask import Flask
+from flask_cors import CORS
+
+from config import CONFIG
+from engine import SearchEngine
+from routes import api
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+def create_app() -> Flask:
+    """
+    Application factory for creating the Flask app.
+    
+    Returns:
+        Flask: Configured Flask application instance
+    """
+    app = Flask(__name__)
+    
+    # Enable CORS for all routes
+    CORS(app)
+    
+    # Initialize search engine
+    logger.info("Initializing BigSearch Engine...")
+    try:
+        engine = SearchEngine()
+        engine.initialize()
+        
+        # Store engine in app context for access in routes
+        app.config['search_engine'] = engine
+        
+        logger.info("BigSearch Engine initialized successfully")
+        logger.info(f"Engine state: {engine.get_state()}")
+    except Exception as e:
+        logger.error(f"Failed to initialize search engine: {e}")
+        raise
+    
+    # Register blueprints
+    app.register_blueprint(api, url_prefix='/api')
+    
+    # Health check endpoint
+    @app.route('/health')
+    def health_check():
+        return {'status': 'healthy', 'service': 'BigSearch API'}
+    
+    # Root endpoint
+    @app.route('/')
+    def root():
+        return {
+            'name': 'BigSearch API',
+            'version': '1.0.0',
+            'endpoints': {
+                'search': '/api/search?q=<query>',
+                'autocomplete': '/api/autocomplete?q=<prefix>',
+                'index_html': 'POST /api/index/html',
+                'index_json': 'POST /api/index/json',
+                'index_pdf': 'POST /api/index/pdf',
+                'status': '/api/status',
+                'health': '/health'
+            }
+        }
+    
+    return app
+
+
+def main():
+    """Main entry point for running the server."""
+    app = create_app()
+    
+    logger.info(f"Starting BigSearch Server on port {CONFIG['PORT']}...")
+    logger.info("Press Ctrl+C to stop the server")
+    
+    app.run(
+        host='0.0.0.0',
+        port=CONFIG['PORT'],
+        debug=False,
+    )
+
+
+if __name__ == '__main__':
+    main()

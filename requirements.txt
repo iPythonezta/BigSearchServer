@@ -1,0 +1,19 @@
+# BigSearch Server Dependencies
+
+# Web Framework
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Fast JSON/MessagePack
+orjson>=3.9.0
+ormsgpack>=1.4.0
+
+# Word2Vec / NLP
+gensim>=4.3.0
+
+# Utils
+tqdm>=4.65.0
