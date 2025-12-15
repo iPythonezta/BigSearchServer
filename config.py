@@ -17,6 +17,7 @@ SEMANTIC_DIR = os.path.join(DATA_DIR, "semantic")
 MAPPINGS_DIR = os.path.join(DATA_DIR, "mappings")
 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
 MODELS_DIR = os.path.join(DATA_DIR, "models")
+MEMORY_BARRELS_DIR = os.path.join(DATA_DIR, "mem_barrels")
 
 # Cache settings
 WORD_CACHE_SIZE = 500

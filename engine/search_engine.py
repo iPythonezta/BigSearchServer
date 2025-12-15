@@ -15,6 +15,7 @@ import orjson
 from urllib.parse import urlparse
 from collections import Counter, defaultdict, OrderedDict
 from typing import Dict, List, Optional, Any
+from MMapBarrel.MMapBarrel import MMapBarrel
 import config
 
 
@@ -95,6 +96,15 @@ class SearchEngine:
             print("  → Loading barrel index...")
             with open(os.path.join(config.BARRELS_DIR, "barrels_index.json"), "r", encoding="utf-8") as f:
                 self.barrels_index = orjson.loads(f.read())
+
+            print(" → Loading barrels into memory-mapped format...")
+            self.mmap_barrels = {}
+            for barrles_fname in os.listdir(config.MEMORY_BARRELS_DIR):
+                if barrles_fname.startswith("barrel_"):
+                    barrel_id = barrles_fname.split("_")[1]
+                    barrel_path = os.path.join(config.MEMORY_BARRELS_DIR, barrles_fname)
+                    self.mmap_barrels[int(barrel_id)] = MMapBarrel(barrel_path)
+
             
             # Load semantic search data
             print("  → Loading semantic search data...")
@@ -218,13 +228,7 @@ class SearchEngine:
         
         barrel_id = indices[0]
         word_index = indices[1]
-        
-        barrel_path = os.path.join(config.BARRELS_DIR, f"{barrel_id}.msgpack")
-        with open(barrel_path, "rb") as f:
-            barrel_data = ormsgpack.unpackb(f.read())
-        
-        posting_list = barrel_data[word_index]
-        
+        posting_list = self.mmap_barrels[barrel_id].get_posting(word_index)
         self.word_cache[word] = posting_list
         
         if len(self.word_cache) > config.WORD_CACHE_SIZE:
@@ -431,18 +435,10 @@ class SearchEngine:
 
         token_hitlists = []
 
-        # Build hitlists
+        # Build hitlists - separate for each document type
         for token in set(tokens_rps + tokens_html):
             htl = self.word_lookup(token, self.barrels_index[token])
-
-            for hit in htl:
-                doc_id = hit[0]
-                is_rps = doc_id.startswith("P")
-
-                valid_tokens = tokens_rps if is_rps else tokens_html
-                if token in valid_tokens:
-                    token_hitlists.append((token, htl, is_rps))
-                    break
+            token_hitlists.append((token, htl))
 
         # Semantic only search
         if not token_hitlists:
@@ -475,19 +471,35 @@ class SearchEngine:
 
             return sorted(results, key=lambda x: x["final_score"], reverse=True)
 
-        # Intersection
-        token_hitlists.sort(key=lambda x: len(x[1]))
-        common_doc_ids = {hit[0] for hit in token_hitlists[0][1]}
+        # Intersection - separate by document type
+        rps_hitlists = [(token, htl) for token, htl in token_hitlists if token in tokens_rps]
+        html_hitlists = [(token, htl) for token, htl in token_hitlists if token in tokens_html]
 
-        for _, hitlist, _ in token_hitlists[1:]:
-            common_doc_ids &= {hit[0] for hit in hitlist}
-            if not common_doc_ids:
-                return []
+        common_doc_ids = set()
+
+        # Process research papers
+        if rps_hitlists:
+            rps_hitlists.sort(key=lambda x: len(x[1]))
+            rps_common = {hit[0] for hit in rps_hitlists[0][1] if hit[0].startswith("P")}
+            for _, hitlist in rps_hitlists[1:]:
+                rps_common &= {hit[0] for hit in hitlist if hit[0].startswith("P")}
+            common_doc_ids |= rps_common
+
+        # Process HTML documents
+        if html_hitlists:
+            html_hitlists.sort(key=lambda x: len(x[1]))
+            html_common = {hit[0] for hit in html_hitlists[0][1] if hit[0].startswith("H")}
+            for _, hitlist in html_hitlists[1:]:
+                html_common &= {hit[0] for hit in hitlist if hit[0].startswith("H")}
+            common_doc_ids |= html_common
+
+        if not common_doc_ids:
+            return []
 
         # Rebuild intersected results
         intersected = defaultdict(list)
 
-        for token, hitlist, _ in token_hitlists:
+        for token, hitlist in token_hitlists:
             for hit in hitlist:
                 if hit[0] in common_doc_ids:
                     intersected[hit[0]].append((token, hit))
@@ -504,19 +516,16 @@ class SearchEngine:
             word_scores = []
             token_positions = defaultdict(list)
             all_positions = []
-            multipliers = []
-
+            
             for token, hit in token_hits:
                 score = self.rank_research_papers(hit) if doc_id.startswith("P") else self.score_html_files(hit)
-                idf_score = self.idf_map.get(token, 0)
-                word_scores.append(score * idf_score)
+                word_scores.append(score)
 
                 pos = hit[1]
                 token_positions[token].extend(pos)
                 all_positions.extend(pos)
-                multipliers.append(idf_score)
 
-            avg_word_score = sum(word_scores) / (len(word_scores) * np.mean(multipliers)) if word_scores else 0
+            avg_word_score = sum(word_scores) / (len(word_scores))
 
             # Phrase bonus
             phrase_bonus = 0
@@ -533,7 +542,7 @@ class SearchEngine:
                     curr = nxt
                     length += 1
 
-                phrase_bonus = max(phrase_bonus, sum(range(length)))
+                phrase_bonus += sum(range(length))
 
             keyword_score = avg_word_score + phrase_bonus
             semantic_score = semantic_scores.get(doc_id, 0.0)
