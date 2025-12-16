@@ -49,9 +49,9 @@ class LSMBarrel:
 
         # Delta
         if idx in self.delta_offsets:
+            print(f"Reading delta postings for idx {idx}")
             for off, size in self.delta_offsets[idx]:
-                self.delta_file.seek(off)
-                postings += ormsgpack.unpackb(self.delta_file.read(size))
+                postings += ormsgpack.unpackb(self.delta_mmap[off:off + size])
 
         return postings
 
@@ -74,6 +74,7 @@ class LSMBarrel:
             self.delta_file.close()
             self.delta_file = open(self.delta_postings, "rb")
         self.delta_mmap = mmap.mmap(self.delta_file.fileno(), 0, access=mmap.ACCESS_READ)
+        print(f"Appended delta postings for idx {idx}")
 
     def compact(self):
         """

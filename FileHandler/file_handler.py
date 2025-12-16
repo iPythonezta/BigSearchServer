@@ -1,6 +1,8 @@
 import json
 import orjson
 from collections import defaultdict, Counter
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 import re
 import os
 
@@ -30,6 +32,75 @@ class FileHandler:
         
         return tokens
     
+    @staticmethod
+    def normalize_and_tokenize_for_html(text):
+        text = re.sub(r'\n', ' ', text)
+        text = re.sub(r'(?<!\d)[^\w\s]|[^\w\s](?!\d)', ' ', text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text.lower().split(' ')
+
+    @staticmethod
+    def process_html_file(file_path, url, doc_id):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        
+        soup = BeautifulSoup(html, 'lxml')  
+        text = soup.get_text()
+        tokens = FileHandler.normalize_and_tokenize_for_html(text)
+        doc_length = len(tokens)
+        
+        tokens_counter = Counter(tokens)
+        
+        positions_map = defaultdict(list)
+        for i, tok in enumerate(tokens):
+            if len(positions_map[tok]) < 15:
+                positions_map[tok].append(i)
+        
+        title_text = []
+        if soup.title:
+            title_text = FileHandler.normalize_and_tokenize_for_html(soup.title.text)
+        title_counter = Counter(title_text)
+        
+        meta_desc_text = []
+        meta_tag = soup.find('meta', attrs={'name': 'description'})
+        if meta_tag and 'content' in meta_tag.attrs:
+            meta_desc_text = FileHandler.normalize_and_tokenize_for_html(meta_tag['content'])
+        meta_counter = Counter(meta_desc_text)
+        
+        headings = []
+        for i in range(1, 7):
+            for heading in soup.find_all(f'h{i}'):
+                headings.extend(FileHandler.normalize_and_tokenize_for_html(heading.text))
+        headings_counter = Counter(headings)
+
+        anchors_tokens = []
+        anchors_counter = Counter(anchors_tokens)
+        
+        url_path = urlparse(url).path
+        domain = urlparse(url).netloc
+
+        hit_lists = {}
+        for word in tokens:
+            hit_list = []
+            hit_list.append(doc_id)
+            hit_list.append(positions_map.get(word, []))
+            hit_list.append([
+                title_counter[word],
+                meta_counter[word],
+                headings_counter[word],
+                tokens_counter[word],
+                anchors_counter[word],
+                1 if word in domain else 0,
+                1 if word in url_path else 0,
+                doc_length
+            ])
+            hit_lists[word] = hit_list
+
+        title = soup.title.text if soup.title else ""
+        meta_desc_text = meta_tag['content'] if meta_tag and 'content' in meta_tag.attrs else ""
+        
+        return hit_lists, title, meta_desc_text, text
+
     @staticmethod
     def process_json_file(file_path):
         MAX_POS = 15
@@ -187,6 +258,15 @@ class FileHandler:
         with open(save_path, 'wb') as f:
             f.write(file_content)
         return save_path
+    
+    @staticmethod
+    def save_temp_file_html(file_content, save_name):
+        save_path = os.path.join(os.getcwd(), 'data', 'temp', save_name)
+        with open(save_path, 'wb') as f:
+            f.write(file_content)
+        return save_path
+
+
 
 
 

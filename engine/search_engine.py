@@ -32,10 +32,14 @@ class SearchEngine:
         """Initialize the search engine and load all required data."""
         self.initialized = False
         self.semantic_available = False
-        
+        self.MERGE_THRESHOLD = 3
         # Word-level cache
         self.word_cache = OrderedDict()
         self._cache_updates_since_save = 0
+        
+        # Auto-save tracking
+        self._documents_since_save = 0
+        self._auto_save_interval = 5  # Save after every N documents
         
         # Data stores
         self.barrels_index = {}
@@ -144,10 +148,21 @@ class SearchEngine:
             # Load engine state
             self._load_state()
             
-            # Update state with current document counts
-            self.state["last_html_id"] = self.html_docs_count
-            self.state["last_json_id"] = self.json_docs_count
+            # Update state with current document counts if state is older than actual data
+            # This ensures we use the maximum of saved state or actual embedding counts
+            if self.state["last_html_id"] < self.html_docs_count:
+                print(f"    → State out of sync: updating last_html_id from {self.state['last_html_id']} to {self.html_docs_count}")
+                self.state["last_html_id"] = self.html_docs_count
+            
+            if self.state["last_json_id"] < self.json_docs_count:
+                print(f"    → State out of sync: updating last_json_id from {self.state['last_json_id']} to {self.json_docs_count}")
+                self.state["last_json_id"] = self.json_docs_count
+            
             self.state["total_documents"] = self.html_docs_count + self.json_docs_count
+            
+            # Save the corrected state
+            if self.state["last_html_id"] != self.html_docs_count or self.state["last_json_id"] != self.json_docs_count:
+                self.save_state()
             
             self.initialized = True
             print("✓ BigSearch Server Engine loaded successfully!\n")
@@ -160,12 +175,13 @@ class SearchEngine:
             return False
     
     def _initialize_norms(self):
-            merged_embeddings = self.html_embeddings + self.json_embeddings
-            self.html_docs_count = len(self.html_embeddings)
-            self.json_docs_count = len(self.json_embeddings)
-            self.merged_embeddings_np = np.array(merged_embeddings)
-            self.doc_norms = np.linalg.norm(self.merged_embeddings_np, axis=1)
-            self.doc_norms[self.doc_norms == 0] = 1
+        merged_embeddings = self.html_embeddings + self.json_embeddings
+        self.html_docs_count = len(self.html_embeddings)
+        self.json_docs_count = len(self.json_embeddings)
+        self.merged_embeddings_np = np.array(merged_embeddings)
+        self.doc_norms = np.linalg.norm(self.merged_embeddings_np, axis=1)
+        self.doc_norms[self.doc_norms == 0] = 1
+
     
     def _load_word_cache(self):
         """Load word cache from disk if exists."""
@@ -214,6 +230,28 @@ class SearchEngine:
         except Exception as e:
             print(f"⚠ Could not save state: {e}")
     
+    def _save_mappings(self):
+        """Save URL and title mappings to disk."""
+        try:
+            with open(os.path.join(config.MAPPINGS_DIR, "ind_to_url.json"), "wb") as f:
+                f.write(orjson.dumps(self.doc_id_to_url))
+            
+            with open(os.path.join(config.MAPPINGS_DIR, "docid_to_title.json"), "wb") as f:
+                f.write(orjson.dumps(self.doc_id_to_title))
+        except Exception as e:
+            print(f"⚠ Could not save mappings: {e}")
+    
+    def _save_embeddings(self):
+        """Save embeddings to disk."""
+        try:
+            with open(os.path.join(config.SEMANTIC_DIR, "html_embeddings.json"), "wb") as f:
+                f.write(orjson.dumps(self.html_embeddings))
+            
+            with open(os.path.join(config.SEMANTIC_DIR, "json_embeddings.json"), "wb") as f:
+                f.write(orjson.dumps(self.json_embeddings))
+        except Exception as e:
+            print(f"⚠ Could not save embeddings: {e}")
+    
     def get_state(self) -> Dict:
         """Get current engine state."""
         return {
@@ -247,7 +285,6 @@ class SearchEngine:
             self._cache_updates_since_save = 0
         
         extra = self.temporary_associations.get(word, [])
-
         return posting_list + extra
     
     # ==================== TEXT PROCESSING ====================
@@ -470,7 +507,7 @@ class SearchEngine:
                 title = (
                     self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[0]
                     if doc_id.startswith("P")
-                    else self.doc_id_to_title.get(doc_id[1:], "")[0]
+                    else self.doc_id_to_title.get(doc_id[1:], ("",""))[0]
                 )
 
                 results.append({
@@ -528,7 +565,7 @@ class SearchEngine:
                 title = (
                     self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[0]
                     if doc_id.startswith("P")
-                    else self.doc_id_to_title.get(doc_id[1:], "")[0]
+                    else self.doc_id_to_title.get(doc_id[1:], ("",""))[0]
                 )
 
                 results.append({
@@ -605,7 +642,7 @@ class SearchEngine:
             title = (
                 self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[0]
                 if doc_id.startswith("P")
-                else self.doc_id_to_title.get(doc_id[1:], "")[0]
+                else self.doc_id_to_title.get(doc_id[1:], ("",""))[0]
             )
 
             ranked.append({
@@ -624,18 +661,16 @@ class SearchEngine:
 
     def index_new_rps(self, file_content, url):
         """
-        Incrementally index a new research paper (RPS).
-        Keyword index goes to delta barrels.
-        Embedding goes to semantic store.
+            Incrementally index a new research paper (RPS).
+            Keyword index goes to delta barrels.
+            Embedding goes to semantic store.
         """
 
-        # ---- 1. Assign ID safely ----
         new_id = self.state["last_json_id"]
         doc_id = f"P{new_id}"
         self.state["last_json_id"] += 1
         self.state["total_documents"] += 1
 
-        # ---- 2. Save file ----
         file_name = f"{doc_id}.json"
         title = ""
         try:
@@ -644,7 +679,6 @@ class SearchEngine:
             pass
         rp_path = FileHandler.save_temp_file_rp(file_content, file_name)
 
-        # ---- 3. Keyword indexing (DELTA) ----
         hitlists = FileHandler.process_json_file(rp_path)
         for word, hitlist in hitlists.items():
             if word in self.barrels_index:
@@ -652,15 +686,15 @@ class SearchEngine:
                 self.pending_additions_per_barrel[barrel] += 1
                 self.words_pending_additions_barrel[barrel].add(word)
                 self.temporary_associations.setdefault(word, []).append(hitlist)
+                if self.pending_additions_per_barrel[barrel] >= self.MERGE_THRESHOLD:
+                    self.merge_in_bg(barrel)
 
-        # ---- 4. Semantic embedding ----
         text = FileHandler.extract_text_from_json(rp_path)
         tokens = FileHandler.preprocess_text(text)
         doc_embedding = self.query_to_embedding(tokens)
 
         self.json_embeddings.append(doc_embedding.tolist())
 
-        # ---- 5. Update semantic matrices ----
         self.merged_embeddings_np = np.vstack([
             self.merged_embeddings_np,
             doc_embedding
@@ -669,7 +703,66 @@ class SearchEngine:
         self.doc_norms = np.linalg.norm(self.merged_embeddings_np, axis=1)
         self.doc_norms[self.doc_norms == 0] = 1
         self.rps_info_dict[str(new_id)] = (title, url)
+        self.json_docs_count += 1
 
+        return doc_id
+    
+    def index_new_html(self, file_content, url):
+        """
+            Incrementally index a new HTML document.
+            Keyword index goes to delta barrels.
+            Embedding goes to semantic store.
+        """
+
+        new_id = self.state["last_html_id"]
+        doc_id = f"H{new_id}"
+        self.state["last_html_id"] += 1
+        self.state["total_documents"] += 1
+
+        file_name = f"{doc_id}.html"
+        html_path = FileHandler.save_temp_file_html(file_content, file_name)
+
+        hitlists, title, meta_desc, text = FileHandler.process_html_file(html_path, url, doc_id)
+        for word, hitlist in hitlists.items():
+            if word in self.barrels_index:
+                barrel = self.barrels_index[word][0]
+                self.pending_additions_per_barrel[barrel] += 1
+                self.words_pending_additions_barrel[barrel].add(word)
+                self.temporary_associations.setdefault(word, []).append(hitlist)
+                if self.pending_additions_per_barrel[barrel] >= self.MERGE_THRESHOLD:
+                    self.merge_in_bg(barrel)
+                # print(f"Queued word '{word}' for barrel {barrel} with hitlist for doc {doc_id}")
+
+        tokens = FileHandler.preprocess_text(text)
+        doc_embedding = self.query_to_embedding(tokens)
+
+        self.html_embeddings.append(doc_embedding.tolist())
+
+        self.merged_embeddings_np = np.vstack([
+            np.array(self.html_embeddings),
+            np.array(self.json_embeddings)
+        ])
+
+        self.doc_norms = np.linalg.norm(self.merged_embeddings_np, axis=1)
+        self.doc_norms[self.doc_norms == 0] = 1
+
+        self.doc_id_to_url[str(new_id)] = url
+        self.doc_id_to_title[str(new_id)] = [title, meta_desc]
+        self.html_docs_count += 1
+        
+        # Increment documents counter
+        self._documents_since_save += 1
+        
+        # Periodic auto-save every N documents
+        if self._documents_since_save >= self._auto_save_interval:
+            print(f"  → Periodic auto-save triggered after {self._documents_since_save} documents...")
+            self.save_state()
+            self._save_mappings()
+            self._save_embeddings()
+            self._documents_since_save = 0
+        
+        print(f"  ✓ Indexed {doc_id} ({self._documents_since_save}/{self._auto_save_interval} until next full save)")
+        
         return doc_id
     
     def merge_in_bg(self, barrel_id):
@@ -686,31 +779,52 @@ class SearchEngine:
 
         self.pending_additions_per_barrel[barrel_id] = 0
 
+    def save_all_files(self):
+        """Save all dynamic data to disk for persistence."""
+        print("  → Saving all modified files...")
+        
+        try:
+            # Save embeddings
+            print("    → Saving embeddings...")
+            with open(os.path.join(config.SEMANTIC_DIR, "json_embeddings.json"), "wb") as f:
+                f.write(orjson.dumps(self.json_embeddings))
+            
+            with open(os.path.join(config.SEMANTIC_DIR, "html_embeddings.json"), "wb") as f:
+                f.write(orjson.dumps(self.html_embeddings))
+            
+            # Flush all pending barrel updates
+            print("    → Flushing barrel updates...")
+            for barrel_id in list(self.pending_additions_per_barrel.keys()):
+                if self.pending_additions_per_barrel[barrel_id] > 0:
+                    self.merge_in_bg(barrel_id)
+            
+            # Save mappings
+            print("    → Saving URL and title mappings...")
+            with open(os.path.join(config.MAPPINGS_DIR, "ind_to_url.json"), "wb") as f:
+                f.write(orjson.dumps(self.doc_id_to_url))
+            
+            with open(os.path.join(config.MAPPINGS_DIR, "docid_to_title.json"), "wb") as f:
+                f.write(orjson.dumps(self.doc_id_to_title))
+            
+            # Save research paper info (if modified)
+            print("    → Saving research paper info...")
+            with open(os.path.join(config.MAPPINGS_DIR, "rps_info.json"), "wb") as f:
+                f.write(orjson.dumps(self.rps_info_dict))
+            
+            print("  ✓ All files saved successfully")
+            
+        except Exception as e:
+            print(f"  ✗ Error saving files: {e}")
+            import traceback
+            traceback.print_exc()
 
-    
     def shutdown(self):
         """Cleanup on shutdown - save cache and state."""
         print("Shutting down search engine...")
         self.save_word_cache()
         self.save_state()
-        # Dump everything into disk
-        with open(os.path.join(config.SEMANTIC_DIR, "json_embeddings.json"), "wb") as f:
-            f.write(orjson.dumps(self.json_embeddings))
-
-        with open(os.path.join(config.SEMANTIC_DIR, "html_embeddings.json"), "wb") as f:
-            f.write(orjson.dumps(self.html_embeddings))
-
-        # Save all words into barrel
-        for barrel_id in list(self.pending_additions_per_barrel.keys()):
-            self.merge_in_bg(barrel_id)
+        self.save_all_files()
         
-        # Save all dicts to json
-
-        with open(os.path.join(config.MAPPINGS_DIR, "rps_info.json"), "wb") as f:
-            f.write(orjson.dumps(self.rps_info_dict))
-        
-        with open(os.path.join(config.MAPPINGS_DIR, "ind_to_url.json"), "wb") as f:
-            f.write(orjson.dumps(self.doc_id_to_url))
 
         print("✓ Search engine shutdown complete")
 

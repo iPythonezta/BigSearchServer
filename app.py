@@ -13,12 +13,18 @@ from engine import SearchEngine
 from routes import api
 from load_trie import get_trie
 
-# Configure logging
+# Configure logging with more detail
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,  # Changed to DEBUG for more detail
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+    ]
 )
 logger = logging.getLogger(__name__)
+
+# Set Flask's logger to be more verbose
+logging.getLogger('werkzeug').setLevel(logging.DEBUG)
 
 
 def create_app() -> Flask:
@@ -86,7 +92,8 @@ def create_app() -> Flask:
                 'index_json': 'POST /api/index/json',
                 'index_pdf': 'POST /api/index/pdf',
                 'status': '/api/status',
-                'health': '/health'
+                'health': '/health',
+                'save': 'POST /api/save (manual save all data)'
             }
         }
     
@@ -99,12 +106,17 @@ def main():
     
     logger.info(f"Starting BigSearch Server on port {CONFIG['PORT']}...")
     logger.info("Press Ctrl+C to stop the server")
-    
-    app.run(
-        host='0.0.0.0',
-        port=CONFIG['PORT'],
-        debug=False,
-    )
+    logger.info("Error tracebacks will be printed to stderr")
+    try:
+        app.run(
+            host='0.0.0.0',
+            port=CONFIG['PORT'],
+            debug=True,  # Enable debug mode for better error messages
+            use_reloader=False  # Disable reloader to prevent double initialization
+        )
+    except KeyboardInterrupt:
+        logger.info("BigSearch Server shutting down...")
+        app.config['search_engine'].shutdown()
 
 
 if __name__ == '__main__':

@@ -5,10 +5,37 @@ REST API endpoints for the BigSearch search engine.
 """
 
 from flask import Blueprint, request, jsonify, current_app
+import requests
 import config
+import traceback
+import sys
 
 # Create blueprint
 api = Blueprint('api', __name__, url_prefix='/api')
+
+
+def handle_error(e, endpoint_name):
+    """
+    Print detailed error traceback and return JSON error response.
+    
+    Args:
+        e: The exception object
+        endpoint_name: Name of the endpoint where error occurred
+    
+    Returns:
+        Tuple of (json_response, status_code)
+    """
+    print("\n" + "=" * 70, file=sys.stderr)
+    print(f"ERROR in {endpoint_name}", file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+    traceback.print_exc()
+    print("=" * 70 + "\n", file=sys.stderr)
+    
+    return jsonify({
+        "error": str(e),
+        "success": False,
+        "traceback": traceback.format_exc()  # Include traceback in response for debugging
+    }), 500
 
 
 
@@ -62,10 +89,7 @@ def search():
         })
         
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "success": False
-        }), 500
+        return handle_error(e, "/api/search (POST)")
 
 
 @api.route('/search', methods=['GET'])
@@ -108,10 +132,7 @@ def search_get():
         })
         
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "success": False
-        }), 500
+        return handle_error(e, "/api/search (GET)")
 
 
 # ==================== AUTOCOMPLETE ENDPOINTS ====================
@@ -160,10 +181,7 @@ def autocomplete():
         })
         
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "success": False
-        }), 500
+        return handle_error(e, "/api/autocomplete (GET)")
 
 
 # ==================== INDEXING ENDPOINTS ====================
@@ -198,29 +216,31 @@ def index_html():
                 "success": False
             }), 400
         
-        # TODO: Implement HTML indexing logic
-        # 1. Fetch HTML from URL
-        # 2. Parse and extract text
-        # 3. Generate forward index entry
-        # 4. Update inverted index/barrels
-        # 5. Update embeddings (optional)
-        
         engine = current_app.config['search_engine']
-        next_id = engine.state.get("last_html_id", 0) + 1
+        html_content = requests.get(url, headers={
+            'User-Agent': 'Chrome/91.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+
+        if html_content.status_code >= 300:
+            return jsonify({
+                "error": f"Failed to fetch URL: {html_content.status_code}",
+                "success": False
+            }), 400
+
+        text = html_content.content
+        print(f"Fetched HTML content from {url} (length: {len(text)})")
+        print(f"Status Code: {html_content.status_code}")
+        engine.index_new_html(text, url)
         
         return jsonify({
             "success": True,
-            "message": "HTML indexing not yet implemented",
+            "message": "Document indexing complete",
             "url": url,
-            "assigned_id": f"H{next_id}",
-            "status": "pending"
+            "status": "complete"
         })
         
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "success": False
-        }), 500
+        return handle_error(e, "/api/index/html (POST)")
 
 
 @api.route('/index/json', methods=['POST'])
@@ -287,10 +307,7 @@ def index_json():
         })
         
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "success": False
-        }), 500
+        return handle_error(e, "/api/index/json (POST)")
 
 
 @api.route('/index/pdf', methods=['POST'])
@@ -347,10 +364,7 @@ def index_pdf():
         })
         
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "success": False
-        }), 500
+        return handle_error(e, "/api/index/pdf (POST)")
 
 
 # ==================== STATUS ENDPOINTS ====================
@@ -374,11 +388,7 @@ def status():
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "status": "error",
-            "error": str(e)
-        }), 500
+        return handle_error(e, "/api/status (GET)")
 
 
 @api.route('/health', methods=['GET'])
@@ -399,7 +409,39 @@ def health():
         })
         
     except Exception as e:
+        return handle_error(e, "/api/health (GET)")
+
+
+# ==================== PERSISTENCE ENDPOINTS ====================
+
+@api.route('/save', methods=['POST'])
+def save_all():
+    """
+    Manual save endpoint - triggers a full save of all engine data.
+    
+    This will:
+    - Save all embeddings to disk
+    - Flush all pending barrel updates
+    - Save URL and title mappings
+    - Save research paper info
+    - Save engine state
+    
+    Returns:
+        JSON with save status
+    """
+    try:
+        engine = current_app.config['search_engine']
+        
+        print("\nManual save triggered via API...")
+        engine.save_all_files()
+        engine.save_state()
+        engine.save_word_cache()
+        
         return jsonify({
-            "status": "unhealthy",
-            "error": str(e)
-        }), 503
+            "success": True,
+            "message": "All data saved successfully",
+            "state": engine.get_state()
+        })
+        
+    except Exception as e:
+        return handle_error(e, "/api/save (POST)")
