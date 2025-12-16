@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from collections import Counter, defaultdict, OrderedDict
 from typing import Dict, List, Optional, Any
 from MMapBarrel.MMapBarrel import MMapBarrel
+from FileHandler.file_handler import FileHandler
 import config
 
 
@@ -52,7 +53,6 @@ class SearchEngine:
         # State tracking for dynamic indexing
         self.state = {
             "last_html_id": 0,
-            "last_pdf_id": 0,
             "last_json_id": 0,
             "total_documents": 0
         }
@@ -481,7 +481,7 @@ class SearchEngine:
         if rps_hitlists:
             rps_hitlists.sort(key=lambda x: len(x[1]))
             rps_common = {hit[0] for hit in rps_hitlists[0][1] if hit[0].startswith("P")}
-            for _, hitlist in rps_hitlists[1:]:
+            for token, hitlist in rps_hitlists[1:]:
                 rps_common &= {hit[0] for hit in hitlist if hit[0].startswith("P")}
             common_doc_ids |= rps_common
 
@@ -494,7 +494,31 @@ class SearchEngine:
             common_doc_ids |= html_common
 
         if not common_doc_ids:
-            return []
+            semantic_scores = self.get_semantic_scores(query) if use_semantic and self.semantic_available else {}
+            if not semantic_scores:
+                return []
+            # Return semantic-only results
+            results = []
+            for doc_id, sem_score in semantic_scores.items():
+                if sem_score <= 0:
+                    continue
+
+                url = (
+                    self.rps_info_dict.get(int(doc_id[1:]), ("", ""))[1]
+                    if doc_id.startswith("P")
+                    else self.doc_id_to_url.get(doc_id[1:], "")
+                )
+
+                results.append({
+                    "doc_id": doc_id,
+                    "final_score": semantic_weight * sem_score,
+                    "keyword_score": 0,
+                    "semantic_score": sem_score,
+                    "avg_word_score": 0,
+                    "phrase_bonus": 0,
+                    "url": url,
+                    "positions": []
+                })
 
         # Rebuild intersected results
         intersected = defaultdict(list)
@@ -567,6 +591,11 @@ class SearchEngine:
             })
 
         return sorted(ranked, key=lambda x: x["final_score"], reverse=True)
+
+    def index_new_rps(self, rp_path):
+        """Index new research papers from the given path."""
+        hitlists = FileHandler.process_json_file(rp_path)
+        
     
     def shutdown(self):
         """Cleanup on shutdown - save cache and state."""

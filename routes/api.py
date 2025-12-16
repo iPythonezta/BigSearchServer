@@ -11,6 +11,7 @@ import config
 api = Blueprint('api', __name__, url_prefix='/api')
 
 
+
 # ==================== SEARCH ENDPOINTS ====================
 
 @api.route('/search', methods=['POST'])
@@ -118,20 +119,18 @@ def search_get():
 @api.route('/autocomplete', methods=['GET'])
 def autocomplete():
     """
-    Autocomplete endpoint - returns word suggestions based on prefix.
+    Autocomplete endpoint - returns query suggestions based on prefix.
     
     Query Parameters:
         - q (str): Partial word/query for autocomplete (required)
-        - limit (int): Maximum number of suggestions (default: 10)
+        - limit (int): Maximum number of suggestions (default: 5)
     
     Returns:
-        JSON array of autocomplete suggestions
-    
-    Note: This is a placeholder endpoint. Implementation pending.
+        JSON array of autocomplete suggestions sorted by term frequency
     """
     try:
         query = request.args.get('q', '').strip()
-        limit = int(request.args.get('limit', 10))
+        limit = int(request.args.get('limit', 5))
         
         if not query:
             return jsonify({
@@ -139,15 +138,25 @@ def autocomplete():
                 "success": False
             }), 400
         
-        # TODO: Implement autocomplete logic
-        # For now, return placeholder response
-        suggestions = []
+        # Get trie from app context
+        trie = current_app.config.get('autocomplete_trie')
+        
+        if not trie or not trie.loaded:
+            return jsonify({
+                "success": True,
+                "query": query,
+                "suggestions": [],
+                "message": "Autocomplete service not available"
+            })
+        
+        # Get suggestions
+        suggestions = trie.suggest(query, k=limit)
         
         return jsonify({
             "success": True,
             "query": query,
             "suggestions": suggestions,
-            "message": "Autocomplete not yet implemented"
+            "count": len(suggestions)
         })
         
     except Exception as e:

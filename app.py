@@ -11,6 +11,7 @@ from flask_cors import CORS
 from config import CONFIG
 from engine import SearchEngine
 from routes import api
+from load_trie import get_trie
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +47,23 @@ def create_app() -> Flask:
     except Exception as e:
         logger.error(f"Failed to initialize search engine: {e}")
         raise
+    
+    # Initialize autocomplete trie
+    logger.info("Loading autocomplete trie...")
+    try:
+        trie = get_trie()
+        trie_loaded = trie.load()
+        
+        # Store trie in app context
+        app.config['autocomplete_trie'] = trie
+        
+        if trie_loaded:
+            logger.info("Autocomplete trie loaded successfully")
+        else:
+            logger.warning("Autocomplete trie not available")
+    except Exception as e:
+        logger.warning(f"Failed to load autocomplete trie: {e}")
+        app.config['autocomplete_trie'] = None
     
     # Register blueprints
     app.register_blueprint(api, url_prefix='/api')
