@@ -40,6 +40,7 @@ class SearchEngine:
         # Data stores
         self.barrels_index = {}
         self.doc_id_to_url = {}
+        self.doc_id_to_title = {}
         self.page_rank_dict = {}
         self.domain_rank_dict = {}
         self.citation_dict = {}
@@ -93,6 +94,9 @@ class SearchEngine:
             print("  → Loading URL mappings...")
             with open(os.path.join(config.MAPPINGS_DIR, "ind_to_url.json"), "r") as f:
                 self.doc_id_to_url = orjson.loads(f.read())
+            
+            with open(os.path.join(config.MAPPINGS_DIR, "docid_to_title.json"), "r", encoding="utf-8") as f:
+                self.doc_id_to_title = orjson.loads(f.read())
             
             # Load barrel index
             print("  → Loading barrel index...")
@@ -463,6 +467,12 @@ class SearchEngine:
                     else self.doc_id_to_url.get(doc_id[1:], "")
                 )
 
+                title = (
+                    self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[0]
+                    if doc_id.startswith("P")
+                    else self.doc_id_to_title.get(doc_id[1:], "")[0]
+                )
+
                 results.append({
                     "doc_id": doc_id,
                     "final_score": semantic_weight * sem_score,
@@ -471,6 +481,7 @@ class SearchEngine:
                     "avg_word_score": 0,
                     "phrase_bonus": 0,
                     "url": url,
+                    "title": title,
                     "positions": []
                 })
 
@@ -514,6 +525,12 @@ class SearchEngine:
                     else self.doc_id_to_url.get(doc_id[1:], "")
                 )
 
+                title = (
+                    self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[0]
+                    if doc_id.startswith("P")
+                    else self.doc_id_to_title.get(doc_id[1:], "")[0]
+                )
+
                 results.append({
                     "doc_id": doc_id,
                     "final_score": semantic_weight * sem_score,
@@ -522,6 +539,7 @@ class SearchEngine:
                     "avg_word_score": 0,
                     "phrase_bonus": 0,
                     "url": url,
+                    "title": title,
                     "positions": []
                 })
 
@@ -584,6 +602,12 @@ class SearchEngine:
                 else self.doc_id_to_url.get(doc_id[1:], "")
             )
 
+            title = (
+                self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[0]
+                if doc_id.startswith("P")
+                else self.doc_id_to_title.get(doc_id[1:], "")[0]
+            )
+
             ranked.append({
                 "doc_id": doc_id,
                 "final_score": final_score,
@@ -592,6 +616,7 @@ class SearchEngine:
                 "avg_word_score": avg_word_score,
                 "phrase_bonus": phrase_bonus,
                 "url": url,
+                "title": title,
                 "positions": all_positions
             })
 
