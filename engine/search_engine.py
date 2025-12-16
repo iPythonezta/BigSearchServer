@@ -16,7 +16,9 @@ from urllib.parse import urlparse
 from collections import Counter, defaultdict, OrderedDict
 from typing import Dict, List, Optional, Any
 from MMapBarrel.MMapBarrel import MMapBarrel
+from MMapBarrel.LSMBarrel import LSMBarrel
 from FileHandler.file_handler import FileHandler
+from gensim.models import KeyedVectors
 import config
 
 
@@ -43,6 +45,9 @@ class SearchEngine:
         self.citation_dict = {}
         self.rps_info_dict = {}
         self.idf_map = {}
+        self.temporary_associations = {} # Word to temporary document associations
+        self.pending_additions_per_barrel = defaultdict(int)
+        self.words_pending_additions_barrel = defaultdict(set)
         
         # Semantic search data
         self.word2vec_model = None
@@ -66,26 +71,23 @@ class SearchEngine:
             print("Loading BigSearch Server Engine...")
             
             # Load page rank data
-            print("  → Loading page rank data...")
-            page_rank_results = pd.read_csv(
-                os.path.join(config.RANKINGS_DIR, "page_rank_results_with_urls.csv")
-            )
-            domain_rank_results = pd.read_csv(
-                os.path.join(config.RANKINGS_DIR, "domain_rank_results_with_domain_nm.csv")
-            )
-            citation_rank = pd.read_csv(
-                os.path.join(config.RANKINGS_DIR, "citation_ranks_with_scores.csv")
-            )
-            rps_info = pd.read_csv(
-                os.path.join(config.MAPPINGS_DIR, "metadata_cleaned.csv")
-            )
-            
+           
             # Create rank dictionaries
             print("  → Creating rank dictionaries...")
-            self.citation_dict = dict(zip(citation_rank["paper_title"], citation_rank["Score"]))
-            self.rps_info_dict = dict(zip(rps_info["id"], zip(rps_info["title"], rps_info["url"])))
-            self.page_rank_dict = dict(zip(page_rank_results["URL"], page_rank_results["Score"]))
-            self.domain_rank_dict = dict(zip(domain_rank_results["Domain"], domain_rank_results["Score"]))
+            with open(os.path.join(config.RANKINGS_DIR, "citation_ranks.json"), "rb") as f:
+                self.citation_dict = orjson.loads(f.read())
+            
+            with open(os.path.join(config.RANKINGS_DIR, "page_rank_dict.json"), "rb") as f:
+                self.page_rank_dict = orjson.loads(f.read())
+            
+            with open(os.path.join(config.RANKINGS_DIR, "domain_rank_dict.json"), "rb") as f:
+                self.domain_rank_dict = orjson.loads(f.read())
+            
+            # Load research paper info
+            print("  → Loading research paper info...")
+            with open(os.path.join(config.MAPPINGS_DIR, "rps_info.json"), "rb") as f:
+                self.rps_info_dict = orjson.loads(f.read())
+
             
             # Load URL mappings
             print("  → Loading URL mappings...")
@@ -103,34 +105,28 @@ class SearchEngine:
                 if barrles_fname.startswith("barrel_"):
                     barrel_id = barrles_fname.split("_")[1]
                     barrel_path = os.path.join(config.MEMORY_BARRELS_DIR, barrles_fname)
-                    self.mmap_barrels[int(barrel_id)] = MMapBarrel(barrel_path)
+                    self.mmap_barrels[int(barrel_id)] = LSMBarrel(barrel_path)
 
             
             # Load semantic search data
             print("  → Loading semantic search data...")
             try:
-                html_embeddings = orjson.loads(
+                self.html_embeddings = orjson.loads(
                     open(os.path.join(config.SEMANTIC_DIR, "html_embeddings.json"), 'rb').read()
                 )
-                json_embeddings = orjson.loads(
+                self.json_embeddings = orjson.loads(
                     open(os.path.join(config.SEMANTIC_DIR, "json_embeddings.json"), 'rb').read()
                 )
                 self.idf_map = orjson.loads(
                     open(os.path.join(config.SEMANTIC_DIR, "idf_map.json"), 'rb').read()
                 )
                 
-                from gensim.models import KeyedVectors
                 self.word2vec_model = KeyedVectors.load_word2vec_format(
                     os.path.join(config.MODELS_DIR, "fine_tunned_model.word2vec.txt"),
                     binary=False
                 )
                 
-                merged_embeddings = html_embeddings + json_embeddings
-                self.html_docs_count = len(html_embeddings)
-                self.json_docs_count = len(json_embeddings)
-                self.merged_embeddings_np = np.array(merged_embeddings)
-                self.doc_norms = np.linalg.norm(self.merged_embeddings_np, axis=1)
-                self.doc_norms[self.doc_norms == 0] = 1
+                self._initialize_norms()
                 
                 self.semantic_available = True
                 print("  ✓ Semantic search enabled")
@@ -159,6 +155,14 @@ class SearchEngine:
             traceback.print_exc()
             return False
     
+    def _initialize_norms(self):
+            merged_embeddings = self.html_embeddings + self.json_embeddings
+            self.html_docs_count = len(self.html_embeddings)
+            self.json_docs_count = len(self.json_embeddings)
+            self.merged_embeddings_np = np.array(merged_embeddings)
+            self.doc_norms = np.linalg.norm(self.merged_embeddings_np, axis=1)
+            self.doc_norms[self.doc_norms == 0] = 1
+    
     def _load_word_cache(self):
         """Load word cache from disk if exists."""
         print("  → Initializing word-level cache...")
@@ -167,8 +171,7 @@ class SearchEngine:
                 print(f"    → Loading cached words from {config.WORD_CACHE_FILE}...")
                 with open(config.WORD_CACHE_FILE, "rb") as f:
                     cache_data = ormsgpack.unpackb(f.read())
-                    self.word_cache = cache_data.get("cache", {})
-                    self.word_cache_stack = cache_data.get("stack", [])
+                    self.word_cache = OrderedDict(cache_data.get("cache", {}))
                 print(f"    ✓ Loaded {len(self.word_cache)} cached words")
         except Exception as e:
             print(f"    ⚠ Could not load word cache: {e}")
@@ -180,7 +183,6 @@ class SearchEngine:
         try:
             cache_data = {
                 "cache": self.word_cache,
-                "stack": self.word_cache_stack
             }
             os.makedirs(os.path.dirname(config.WORD_CACHE_FILE), exist_ok=True)
             with open(config.WORD_CACHE_FILE, "wb") as f:
@@ -224,7 +226,8 @@ class SearchEngine:
         if word in self.word_cache:
 
             self.word_cache.move_to_end(word)
-            return self.word_cache[word]
+            extra = self.temporary_associations.get(word, [])
+            return self.word_cache[word] + extra
         
         barrel_id = indices[0]
         word_index = indices[1]
@@ -239,7 +242,9 @@ class SearchEngine:
             self.save_word_cache()
             self._cache_updates_since_save = 0
         
-        return posting_list
+        extra = self.temporary_associations.get(word, [])
+
+        return posting_list + extra
     
     # ==================== TEXT PROCESSING ====================
     
@@ -350,7 +355,7 @@ class SearchEngine:
         final_score = max(1.0, min(80.0, score))
 
         # Add citation rank
-        title = self.rps_info_dict.get(int(doc_id.replace("P", "")), ("", ""))[0].strip()
+        title = self.rps_info_dict.get(str(doc_id.replace("P", "")), ("", ""))[0].strip()
         title = self.normalize_title(title)
         citation_rank_score = self.citation_dict.get(title, 0)
 
@@ -453,7 +458,7 @@ class SearchEngine:
                     continue
 
                 url = (
-                    self.rps_info_dict.get(int(doc_id[1:]), ("", ""))[1]
+                    self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[1]
                     if doc_id.startswith("P")
                     else self.doc_id_to_url.get(doc_id[1:], "")
                 )
@@ -504,7 +509,7 @@ class SearchEngine:
                     continue
 
                 url = (
-                    self.rps_info_dict.get(int(doc_id[1:]), ("", ""))[1]
+                    self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[1]
                     if doc_id.startswith("P")
                     else self.doc_id_to_url.get(doc_id[1:], "")
                 )
@@ -574,7 +579,7 @@ class SearchEngine:
             final_score = keyword_score + semantic_weight * semantic_score
 
             url = (
-                self.rps_info_dict.get(int(doc_id[1:]), ("", ""))[1]
+                self.rps_info_dict.get(str(doc_id[1:]), ("", ""))[1]
                 if doc_id.startswith("P")
                 else self.doc_id_to_url.get(doc_id[1:], "")
             )
@@ -592,15 +597,95 @@ class SearchEngine:
 
         return sorted(ranked, key=lambda x: x["final_score"], reverse=True)
 
-    def index_new_rps(self, rp_path):
-        """Index new research papers from the given path."""
+    def index_new_rps(self, file_content, url):
+        """
+        Incrementally index a new research paper (RPS).
+        Keyword index goes to delta barrels.
+        Embedding goes to semantic store.
+        """
+
+        # ---- 1. Assign ID safely ----
+        new_id = self.state["last_json_id"]
+        doc_id = f"P{new_id}"
+        self.state["last_json_id"] += 1
+        self.state["total_documents"] += 1
+
+        # ---- 2. Save file ----
+        file_name = f"{doc_id}.json"
+        title = ""
+        try:
+            title = orjson.loads(file_content)["metadata"]["title"]
+        except KeyError:
+            pass
+        rp_path = FileHandler.save_temp_file_rp(file_content, file_name)
+
+        # ---- 3. Keyword indexing (DELTA) ----
         hitlists = FileHandler.process_json_file(rp_path)
-        
+        for word, hitlist in hitlists.items():
+            if word in self.barrels_index:
+                barrel = self.barrels_index[word][0]
+                self.pending_additions_per_barrel[barrel] += 1
+                self.words_pending_additions_barrel[barrel].add(word)
+                self.temporary_associations.setdefault(word, []).append(hitlist)
+
+        # ---- 4. Semantic embedding ----
+        text = FileHandler.extract_text_from_json(rp_path)
+        tokens = FileHandler.preprocess_text(text)
+        doc_embedding = self.query_to_embedding(tokens)
+
+        self.json_embeddings.append(doc_embedding.tolist())
+
+        # ---- 5. Update semantic matrices ----
+        self.merged_embeddings_np = np.vstack([
+            self.merged_embeddings_np,
+            doc_embedding
+        ])
+
+        self.doc_norms = np.linalg.norm(self.merged_embeddings_np, axis=1)
+        self.doc_norms[self.doc_norms == 0] = 1
+        self.rps_info_dict[str(new_id)] = (title, url)
+
+        return doc_id
+    
+    def merge_in_bg(self, barrel_id):
+        if barrel_id not in self.pending_additions_per_barrel:
+            return
+
+        barrel = self.mmap_barrels[barrel_id]
+
+        for word in self.words_pending_additions_barrel[barrel_id]:
+            if word in self.temporary_associations:
+                idx = self.barrels_index[word][1]
+                barrel.append_delta(idx, self.temporary_associations[word])
+                del self.temporary_associations[word]
+
+        self.pending_additions_per_barrel[barrel_id] = 0
+
+
     
     def shutdown(self):
         """Cleanup on shutdown - save cache and state."""
         print("Shutting down search engine...")
         self.save_word_cache()
         self.save_state()
+        # Dump everything into disk
+        with open(os.path.join(config.SEMANTIC_DIR, "json_embeddings.json"), "wb") as f:
+            f.write(orjson.dumps(self.json_embeddings))
+
+        with open(os.path.join(config.SEMANTIC_DIR, "html_embeddings.json"), "wb") as f:
+            f.write(orjson.dumps(self.html_embeddings))
+
+        # Save all words into barrel
+        for barrel_id in list(self.pending_additions_per_barrel.keys()):
+            self.merge_in_bg(barrel_id)
+        
+        # Save all dicts to json
+
+        with open(os.path.join(config.MAPPINGS_DIR, "rps_info.json"), "wb") as f:
+            f.write(orjson.dumps(self.rps_info_dict))
+        
+        with open(os.path.join(config.MAPPINGS_DIR, "ind_to_url.json"), "wb") as f:
+            f.write(orjson.dumps(self.doc_id_to_url))
+
         print("✓ Search engine shutdown complete")
 

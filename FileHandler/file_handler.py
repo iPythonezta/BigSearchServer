@@ -1,4 +1,5 @@
 import json
+import orjson
 from collections import defaultdict, Counter
 import re
 import os
@@ -38,8 +39,9 @@ class FileHandler:
             doc = json.load(f)
 
         # Fix docid source - add P prefix for research papers
-        docid = "P" + os.path.basename(file_path).replace(".json", "")
+        docid = os.path.basename(file_path).replace(".json", "")
         positions_map = defaultdict(list)
+        print(docid)
 
         # Section group counters:
         group1 = Counter()  # title + abstract + authors
@@ -151,6 +153,41 @@ class FileHandler:
             ]
 
         return hitlists
+    
+    @staticmethod
+    def extract_text_from_json(file_path):
+        def recurse(obj, texts):
+            if isinstance(obj, dict):
+                for value in obj.values():
+                    recurse(value, texts)
+            elif isinstance(obj, list):
+                for item in obj:
+                    recurse(item, texts)
+            elif isinstance(obj, str):
+                texts.append(obj)
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = orjson.loads(f.read())
+
+        texts = []
+        recurse(data, texts)
+
+        return " ".join(texts)
+
+    @staticmethod
+    def preprocess_text(text):
+        text = text.lower()
+        text = re.sub(r'[^a-z0-9\s]', '', text)
+        tokens = text.split()
+        return tokens
+    
+    @staticmethod
+    def save_temp_file_rp(file_content, save_name):
+        save_path = os.path.join(os.getcwd(), 'data', 'temp', save_name)
+        with open(save_path, 'wb') as f:
+            f.write(file_content)
+        return save_path
+
 
 
         
