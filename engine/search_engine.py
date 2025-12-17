@@ -32,7 +32,7 @@ class SearchEngine:
         """Initialize the search engine and load all required data."""
         self.initialized = False
         self.semantic_available = False
-        self.MERGE_THRESHOLD = 3
+        self.MERGE_THRESHOLD = 30
         # Word-level cache
         self.word_cache = OrderedDict()
         self._cache_updates_since_save = 0
@@ -731,9 +731,12 @@ class SearchEngine:
                 self.temporary_associations.setdefault(word, []).append(hitlist)
                 if self.pending_additions_per_barrel[barrel] >= self.MERGE_THRESHOLD:
                     self.merge_in_bg(barrel)
+
+                if word in self.word_cache:
+                    del self.word_cache[word]
                 # print(f"Queued word '{word}' for barrel {barrel} with hitlist for doc {doc_id}")
 
-        tokens = FileHandler.preprocess_text(text)
+        tokens = FileHandler.normalize_and_tokenize_for_html(text)
         doc_embedding = self.query_to_embedding(tokens)
 
         self.html_embeddings.append(doc_embedding.tolist())
