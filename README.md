@@ -84,11 +84,38 @@ cp path/to/fine_tunned_model.word2vec.txt data/models/
 
 ### 3. Run the Server
 
+## Frontend Integration
+
+If you are working with the full-stack version of the project, follow these steps to build the frontend and serve it through the Flask backend.
+
+### 1. Build the Frontend
+Navigate to the frontend directory, install dependencies, and generate the production build:
 ```bash
-python app.py
+cd frontend
+npm install
+npm run build
 ```
 
-The server will start on `http://localhost:5000`
+Sync the build to backend:
+
+```bash
+
+cd ..  # Return to repo root (where sync_frontend_build.py is)
+python sync_frontend_build.py
+```
+4. Run the Server
+
+Start the server using main.py:
+
+```bash
+
+python main.py
+```
+The server will start on http://localhost:5000.
+
+The frontend index.html should load automatically.
+
+API calls to /api/* will work in the background.
 
 ## API Endpoints
 

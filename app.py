@@ -7,7 +7,7 @@ Provides endpoints for searching, autocomplete, and document indexing.
 import logging
 from flask import Flask
 from flask_cors import CORS
-
+from flask import send_from_directory
 from config import CONFIG
 from engine import SearchEngine
 from routes import api
@@ -34,7 +34,16 @@ def create_app() -> Flask:
     Returns:
         Flask: Configured Flask application instance
     """
-    app = Flask(__name__)
+    import os
+
+    dist_path = os.path.join(os.path.dirname(__file__), "dist")
+
+    app = Flask(
+        __name__,
+        static_folder=dist_path,
+        static_url_path=""
+    )
+
     
     # Enable CORS for all routes
     CORS(app)
@@ -80,22 +89,26 @@ def create_app() -> Flask:
         return {'status': 'healthy', 'service': 'BigSearch API'}
     
     # Root endpoint
-    @app.route('/')
-    def root():
-        return {
-            'name': 'BigSearch API',
-            'version': '1.0.0',
-            'endpoints': {
-                'search': '/api/search?q=<query>',
-                'autocomplete': '/api/autocomplete?q=<prefix>',
-                'index_html': 'POST /api/index/html',
-                'index_json': 'POST /api/index/json',
-                'index_pdf': 'POST /api/index/pdf',
-                'status': '/api/status',
-                'health': '/health',
-                'save': 'POST /api/save (manual save all data)'
-            }
-        }
+    # Serve frontend index.html
+    @app.route("/")
+    def serve_index():
+        return send_from_directory(app.static_folder, "index.html")
+
+
+    # SPA fallback: serve index.html for non-API routes
+    @app.route("/<path:path>")
+    def serve_static_or_index(path):
+        # Never hijack API routes
+        if path.startswith("api/"):
+            return {"error": "Not Found"}, 404
+    
+        file_path = os.path.join(app.static_folder, path)
+    
+        if os.path.exists(file_path):
+            return send_from_directory(app.static_folder, path)
+    
+        # SPA fallback
+        return send_from_directory(app.static_folder, "index.html")
     
     return app
 
