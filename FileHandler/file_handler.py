@@ -265,6 +265,347 @@ class FileHandler:
         with open(save_path, 'wb') as f:
             f.write(file_content)
         return save_path
+    
+    @staticmethod
+    def pdf_to_json(pdf_bytes, filename):
+        """
+        Convert PDF bytes to CORD-19 JSON format.
+        
+        Args:
+            pdf_bytes: Binary PDF content
+            filename: Original PDF filename
+        
+        Returns:
+            dict: CORD-19 format JSON document with structure:
+                {
+                    "metadata": { "title": "<title>", "authors": [...] },
+                    "abstract": [{ "text": "<abstract>" }],
+                    "body_text": [{ "text": "<paragraph text>" }, ...]
+                }
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            raise ImportError("PyMuPDF library not available. Install with: pip install PyMuPDF")
+        
+        # Open PDF from bytes
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        # Extract text from all pages
+        full_text = ""
+        for page_num in range(len(pdf_doc)):
+            page = pdf_doc[page_num]
+            full_text += page.get_text() + "\n"
+        
+        pdf_doc.close()
+        
+        # Validate extracted text
+        if not full_text or not full_text.strip():
+            raise ValueError("PDF file is empty or contains no extractable text")
+        
+        # Clean up text - split into lines and filter empty lines
+        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+        
+        # Helper function to check if line contains URLs
+        def has_url(text):
+            url_pattern = r'http[s]?://|www\.|\.com|\.org|\.edu|\.net|\.gov|\.in|ISSN'
+            return bool(re.search(url_pattern, text, re.IGNORECASE))
+        
+        # Helper function to check if line is journal metadata
+        def is_journal_metadata(text):
+            text_lower = text.lower()
+            metadata_keywords = ['issn', 'volume', 'vol.', 'issue', 'pp.', 'pages', 'page', 'doi:', 'doi.org']
+            return any(keyword in text_lower for keyword in metadata_keywords) or bool(re.search(r'\b\d{4}\b', text))  # Year pattern
+        
+        # Helper function to check if line is all caps (potential title)
+        def is_all_caps(text):
+            # Check if text is mostly uppercase (allowing some lowercase for articles)
+            if len(text) < 5:
+                return False
+            upper_count = sum(1 for c in text if c.isupper())
+            alpha_count = sum(1 for c in text if c.isalpha())
+            if alpha_count == 0:
+                return False
+            return (upper_count / alpha_count) > 0.7  # At least 70% uppercase
+        
+        # Helper function to check if line contains numbers (likely not title)
+        def has_numbers(text):
+            return bool(re.search(r'\d', text))
+        
+        # ========== TITLE EXTRACTION ==========
+        extracted_title = filename.replace('.pdf', '').replace('_', ' ').replace('-', ' ').strip()
+        title_idx = -1
+        
+        # Strategy 1: Find first all-caps line without numbers, URLs, or journal metadata
+        for i, line in enumerate(lines[:15]):
+            if (len(line) > 10 and len(line) < 250 and 
+                is_all_caps(line) and not has_numbers(line) and 
+                not has_url(line) and not is_journal_metadata(line)):
+                extracted_title = line
+                title_idx = i
+                break
+        
+        # Strategy 2: Find first large text block above author/metadata section
+        if title_idx == -1:
+            for i, line in enumerate(lines[:15]):
+                if (len(line) > 20 and len(line) < 250 and 
+                    not has_url(line) and not is_journal_metadata(line) and
+                    not has_numbers(line)):
+                    # Check if next few lines look like authors or metadata
+                    if i + 3 < len(lines):
+                        next_lines = ' '.join(lines[i+1:i+4]).lower()
+                        if not any(keyword in next_lines for keyword in ['abstract', 'introduction', 'keywords']):
+                            extracted_title = line
+                            title_idx = i
+                            break
+        
+        # Strategy 3: First substantial line (fallback)
+        if title_idx == -1:
+            for i, line in enumerate(lines[:10]):
+                if len(line) > 15 and len(line) < 250:
+                    if not has_url(line) and not is_journal_metadata(line):
+                        extracted_title = line
+                        title_idx = i
+                        break
+        
+        # Clean title - remove any remaining URLs or metadata
+        extracted_title = re.sub(r'http[s]?://[^\s]+|www\.[^\s]+|[^\s]+\.(com|org|edu|net|gov|in)[^\s]*', '', extracted_title, flags=re.IGNORECASE)
+        extracted_title = re.sub(r'\bISSN[:\s]*[\d\-X]+\b', '', extracted_title, flags=re.IGNORECASE)
+        extracted_title = re.sub(r'\b(Volume|Vol\.?|Issue|No\.?|Pages?|PP\.?|P\.?)[\s:]*[\d\-,\s]+\b', '', extracted_title, flags=re.IGNORECASE)
+        extracted_title = re.sub(r'\s+', ' ', extracted_title).strip()
+        
+        # ========== AUTHOR EXTRACTION ==========
+        authors = []
+        author_start_idx = title_idx + 1 if title_idx >= 0 else 1
+        
+        # Keywords to exclude from author lines
+        exclude_keywords = ['issn', 'volume', 'vol.', 'issue', 'page', 'pages', 'abstract', 
+                           'introduction', 'keywords', 'university', 'department', 'institute',
+                           'corresponding', 'email', '@', 'doi', 'www.', '.com', '.org', '.edu']
+        
+        def is_valid_author_line(line):
+            line_lower = line.lower()
+            # Exclude if contains metadata keywords
+            if any(keyword in line_lower for keyword in exclude_keywords):
+                return False
+            # Exclude if mostly numbers
+            if re.match(r'^[\d\s\-\.]+$', line):
+                return False
+            # Exclude URLs
+            if has_url(line):
+                return False
+            # Should be reasonable length
+            if len(line) < 3 or len(line) > 200:
+                return False
+            # Should contain letters
+            if not re.search(r'[a-zA-Z]', line):
+                return False
+            return True
+        
+        # Extract authors from lines after title
+        for i in range(author_start_idx, min(author_start_idx + 10, len(lines))):
+            line = lines[i]
+            
+            # Skip if we hit abstract or introduction
+            line_lower = line.lower()
+            if any(keyword in line_lower for keyword in ['abstract', 'introduction', 'keywords', '1. introduction']):
+                break
+            
+            if not is_valid_author_line(line):
+                continue
+            
+            # Handle comma-separated names
+            if ',' in line:
+                names = [name.strip() for name in line.split(',')]
+                for name in names:
+                    # Remove numeric prefixes like "1", "2", "3"
+                    name = re.sub(r'^\d+[\.\)\s]*', '', name).strip()
+                    if name and len(name) > 2 and len(name) < 100:
+                        authors.append({"name": name})
+                        if len(authors) >= 10:  # Limit authors
+                            break
+            else:
+                # Single author name
+                name = line
+                # Remove numeric prefixes
+                name = re.sub(r'^\d+[\.\)\s]*', '', name).strip()
+                if name and len(name) > 2 and len(name) < 100:
+                    authors.append({"name": name})
+            
+            if len(authors) >= 10:  # Limit total authors
+                break
+        
+        # ========== ABSTRACT EXTRACTION ==========
+        abstract_text = ""
+        abstract_found = False
+        abstract_end_idx = len(lines)
+        
+        for i, line in enumerate(lines):
+            if 'abstract' in line.lower() and len(line) < 100:
+                # Found abstract section, collect next lines until we hit a section header
+                abstract_lines = []
+                for j in range(i + 1, min(i + 50, len(lines))):
+                    next_line = lines[j]
+                    # Stop if we hit common section markers
+                    if any(marker in next_line.lower()[:30] for marker in ['introduction', 'keywords', '1.', 'i.', '1 introduction']):
+                        abstract_end_idx = j
+                        break
+                    abstract_lines.append(next_line)
+                if abstract_lines:
+                    abstract_text = ' '.join(abstract_lines[:30])  # Limit length
+                    abstract_found = True
+                    abstract_end_idx = i + len(abstract_lines) + 1
+                break
+        
+        # Fallback: use first substantial paragraph if no abstract found
+        if not abstract_found and lines:
+            for line in lines[:20]:
+                if len(line) > 50 and not has_url(line):
+                    abstract_text = line[:1000]
+                    break
+        
+        # ========== BODY TEXT STRUCTURE ==========
+        # Find where body starts (after abstract/title/authors)
+        body_start_idx = abstract_end_idx if abstract_found else (author_start_idx + len(authors) + 2)
+        body_start_idx = max(body_start_idx, 5)  # At least skip first few lines
+        
+        # Helper to detect section headings
+        def is_section_heading(line, prev_line_empty=False):
+            line_lower = line.lower().strip()
+            
+            # Check for roman numerals (I, II, III, IV, etc.)
+            if re.match(r'^[IVX]+[\.\)]?\s+[A-Z]', line):
+                return True
+            
+            # Check for numbered sections (1., 2., 3., etc.)
+            if re.match(r'^\d+[\.\)]\s+[A-Z]', line):
+                return True
+            
+            # Check for all-caps short lines (likely headings)
+            if len(line) < 80 and is_all_caps(line) and len(line) > 3:
+                return True
+            
+            # Common section keywords
+            section_keywords = ['introduction', 'methodology', 'methods', 'related work', 'background',
+                              'results', 'discussion', 'conclusion', 'references', 'acknowledgment',
+                              'acknowledgments', 'appendix', 'abstract', 'related', 'implementation',
+                              'algorithm', 'experiment', 'evaluation', 'analysis']
+            
+            # Check if line is mostly a section keyword
+            for keyword in section_keywords:
+                if keyword in line_lower and len(line) < 100:
+                    # Should be at start or after roman/numeral
+                    if (line_lower.startswith(keyword) or 
+                        re.match(r'^[IVX\d]+[\.\)]?\s*' + keyword, line_lower)):
+                        return True
+            
+            return False
+        
+        # Build structured body text with sections
+        body_sections = []
+        current_section = {"section": "", "text": ""}
+        in_body = False
+        
+        for i in range(body_start_idx, len(lines)):
+            line = lines[i]
+            
+            # Skip empty lines
+            if not line.strip():
+                continue
+            
+            # Check if this is a section heading
+            prev_empty = (i > 0 and not lines[i-1].strip()) if i > 0 else False
+            if is_section_heading(line, prev_empty):
+                # Save previous section if it has content
+                if current_section["text"].strip():
+                    body_sections.append(current_section)
+                
+                # Start new section
+                current_section = {
+                    "section": line.strip(),
+                    "text": ""
+                }
+                in_body = True
+            else:
+                # Add to current section
+                if in_body or i >= body_start_idx + 2:
+                    if current_section["text"]:
+                        current_section["text"] += " " + line
+                    else:
+                        current_section["text"] = line
+                    in_body = True
+        
+        # Add final section
+        if current_section["text"].strip():
+            body_sections.append(current_section)
+        
+        # Remove abstract text if it appears in body
+        if abstract_text:
+            abstract_words = set(abstract_text.lower().split()[:20])  # First 20 words
+            filtered_sections = []
+            for section in body_sections:
+                section_words = set(section["text"].lower().split()[:20])
+                # If overlap is too high, skip (likely repeated abstract)
+                overlap = len(abstract_words & section_words)
+                if overlap < 10:  # Less than 10 words overlap
+                    filtered_sections.append(section)
+                elif len(section["text"]) > 500:  # Keep if very long (not just abstract)
+                    filtered_sections.append(section)
+            body_sections = filtered_sections if filtered_sections else body_sections
+        
+        # Convert to body_text format (CORD-19 style)
+        body_text_items = []
+        for section in body_sections:
+            if section["text"].strip():
+                # Use section heading as prefix if available, otherwise just text
+                if section["section"]:
+                    text_with_section = f"{section['section']}\n{section['text']}"
+                else:
+                    text_with_section = section["text"]
+                body_text_items.append({"text": text_with_section.strip()})
+        
+        # Fallback: if no structured sections, use paragraph approach
+        if not body_text_items:
+            paragraphs = []
+            current_para = []
+            
+            for line in lines[body_start_idx:]:
+                if len(line) > 20:
+                    current_para.append(line)
+                else:
+                    if current_para:
+                        para_text = ' '.join(current_para)
+                        if len(para_text.strip()) > 50:
+                            paragraphs.append(para_text)
+                        current_para = []
+            
+            if current_para:
+                para_text = ' '.join(current_para)
+                if len(para_text.strip()) > 50:
+                    paragraphs.append(para_text)
+            
+            if paragraphs:
+                body_text_items = [{"text": para.strip()} for para in paragraphs if para.strip()]
+        
+        # Final fallback: use remaining text
+        if not body_text_items:
+            remaining_text = ' '.join(lines[body_start_idx:])
+            if remaining_text.strip():
+                body_text_items = [{"text": remaining_text.strip()}]
+            else:
+                body_text_items = [{"text": full_text}]
+        
+        document = {
+            "metadata": {
+                "title": extracted_title,
+                "authors": authors if authors else []
+            },
+            "abstract": [{"text": abstract_text.strip()}] if abstract_text.strip() else [],
+            "body_text": body_text_items
+        }
+        
+        return document
+    
 
 
 

@@ -197,8 +197,18 @@ def index_html():
     Returns:
         JSON with indexing status and assigned document ID
     
-    Note: This is a placeholder endpoint. Implementation pending.
+    Example Response:
+        {
+            "success": true,
+            "doc_id": "H100001",
+            "title": "Page Title",
+            "url": "https://example.com/page.html",
+            "indexed_at": "2024-01-15T10:30:00.000000Z"
+        }
     """
+    import requests
+    from datetime import datetime
+    
     try:
         data = request.get_json()
         
@@ -217,49 +227,199 @@ def index_html():
             }), 400
         
         engine = current_app.config['search_engine']
+        
+        # Fetch HTML content from URL (no crawling beyond this URL)
         html_content = requests.get(url, headers={
             'User-Agent': 'Chrome/91.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        })
+        }, timeout=30)
 
         if html_content.status_code >= 300:
             return jsonify({
-                "error": f"Failed to fetch URL: {html_content.status_code}",
+                "error": f"Failed to fetch URL: HTTP {html_content.status_code}",
                 "success": False
             }), 400
 
         text = html_content.content
-        print(f"Fetched HTML content from {url} (length: {len(text)})")
-        print(f"Status Code: {html_content.status_code}")
-        engine.index_new_html(text, url)
+        doc_id = engine.index_new_html(text, url)
+        
+        # Extract title from HTML if available
+        title = ""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(text, 'lxml')
+            if soup.title:
+                title = soup.title.text.strip()
+        except Exception:
+            pass
         
         return jsonify({
             "success": True,
-            "message": "Document indexing complete",
-            "url": url,
-            "status": "complete"
-        })
+            "doc_id": doc_id,
+            "title": title,
+            "url": url if url else None,
+            "indexed_at": datetime.utcnow().isoformat() + "Z"
+        }), 200
         
     except Exception as e:
         return handle_error(e, "/api/index/html (POST)")
 
 
-@api.route('/index/json', methods=['POST'])
-def index_json():
+@api.route('/index/rps', methods=['POST'])
+@api.route('/index/pdf', methods=['POST'])  # Alias for PDF indexing
+def index_rps():
     """
-    Index JSON endpoint - indexes a JSON document.
+    Index RPS endpoint - indexes research papers from PDF files only.
     
-    Request Body:
-        - Can be a JSON object directly (Content-Type: application/json)
-        - Or multipart form with 'file' field containing JSON file
+    Request Body (multipart/form-data only):
+        - file: PDF file (.pdf) - required
+        - url: Optional string (metadata only, no fetching/crawling)
     
     Returns:
         JSON with indexing status and assigned document ID
     
-    Note: This is a placeholder endpoint. Implementation pending.
+    Example Response:
+        {
+            "success": true,
+            "doc_id": "P200001",
+            "title": "Paper Title",
+            "url": "https://example.com/paper.pdf",
+            "indexed_at": "2024-01-15T10:30:00.000000Z"
+        }
     """
+    import orjson
+    from datetime import datetime
+    from FileHandler.file_handler import FileHandler
+    
     try:
+        engine = current_app.config['search_engine']
+        
+        # Reject JSON body requests
+        if request.content_type and 'application/json' in request.content_type:
+            return jsonify({
+                "error": "JSON body not accepted. Use multipart/form-data with 'file' (PDF).",
+                "success": False
+            }), 400
+        
+        # Must use multipart/form-data with file field
+        if 'file' not in request.files:
+            return jsonify({
+                "error": "No file provided. Use multipart/form-data with 'file' field containing a PDF.",
+                "success": False
+            }), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({
+                "error": "No file selected",
+                "success": False
+            }), 400
+        
+        filename_lower = file.filename.lower()
+        
+        # Reject JSON files
+        if filename_lower.endswith('.json'):
+            return jsonify({
+                "error": "JSON files are not accepted. Please upload a PDF file.",
+                "success": False
+            }), 400
+        
+        # Only accept PDF files
+        if not filename_lower.endswith('.pdf'):
+            return jsonify({
+                "error": "File must be a PDF (.pdf) file",
+                "success": False
+            }), 400
+        
+        # Get optional URL (metadata only)
+        url = request.form.get('url', '').strip()
+        
+        # Read PDF file
+        file_bytes = file.read()
+        
+        if not file_bytes:
+            return jsonify({
+                "error": "PDF file is empty",
+                "success": False
+            }), 400
+        
+        # Convert PDF to CORD-19 JSON format using FileHandler
+        try:
+            document = FileHandler.pdf_to_json(file_bytes, file.filename)
+        except Exception as e:
+            return jsonify({
+                "error": f"Failed to process PDF: {str(e)}",
+                "success": False
+            }), 400
+        
+        # Validate document structure
+        if not isinstance(document, dict) or 'metadata' not in document:
+            return jsonify({
+                "error": "Failed to extract document structure from PDF",
+                "success": False
+            }), 400
+        
+        # Extract title
+        title = document.get('metadata', {}).get('title', '')
+        
+        # Convert to binary JSON
+        file_content = orjson.dumps(document)
+        
+        # Call the indexing function (url is metadata only, no fetching)
+        doc_id = engine.index_new_rps(file_content, url)
+        
+        return jsonify({
+            "success": True,
+            "doc_id": doc_id,
+            "title": title,
+            "url": url if url else None,
+            "indexed_at": datetime.utcnow().isoformat() + "Z"
+        }), 200
+        
+    except Exception as e:
+        return handle_error(e, "/api/index/rps (POST)")
+
+
+@api.route('/index/json', methods=['POST'])
+def index_json():
+    """
+    Index JSON endpoint - indexes research papers from JSON files or JSON body.
+    
+    Request Body Options:
+        1. Multipart form (multipart/form-data):
+           - file: JSON file (.json) - required if JSON body not provided
+           - url: Optional string (metadata only, no fetching/crawling)
+        
+        2. JSON body (application/json):
+           - document: JSON document object (CORD-19 format)
+           - url: Optional string (metadata only, no fetching/crawling)
+           OR directly:
+           - metadata, abstract, body_text, etc. (CORD-19 format)
+           - url: Optional string (metadata only)
+    
+    Returns:
+        JSON with indexing status and assigned document ID
+    
+    Example Response:
+        {
+            "success": true,
+            "doc_id": "P200001",
+            "title": "Paper Title",
+            "url": "https://example.com/paper.json",
+            "indexed_at": "2024-01-15T10:30:00.000000Z"
+        }
+    """
+    import orjson
+    from datetime import datetime
+    
+    try:
+        engine = current_app.config['search_engine']
+        url = ""
+        file_content = None
+        title = ""
+        
         # Check if file upload or JSON body
         if 'file' in request.files:
+            # Multipart form upload
             file = request.files['file']
             if file.filename == '':
                 return jsonify({
@@ -267,104 +427,102 @@ def index_json():
                     "success": False
                 }), 400
             
-            if not file.filename.endswith('.json'):
+            filename_lower = file.filename.lower()
+            
+            # Only accept JSON files
+            if not filename_lower.endswith('.json'):
                 return jsonify({
-                    "error": "File must be a JSON file",
+                    "error": "File must be a JSON (.json) file",
                     "success": False
                 }), 400
             
-            # Read file content
-            content = file.read().decode('utf-8')
-            import json
-            document = json.loads(content)
-            source = "file"
-        else:
-            # JSON in request body
-            document = request.get_json()
-            if not document:
+            # Read file as binary (as required by index_new_rps)
+            file_content = file.read()
+            
+            if not file_content:
                 return jsonify({
-                    "error": "No JSON data provided",
+                    "error": "JSON file is empty",
                     "success": False
                 }), 400
-            source = "body"
+            
+            # Get optional URL from form (metadata only)
+            url = request.form.get('url', '').strip()
+            
+            # Validate JSON can be parsed
+            try:
+                parsed = orjson.loads(file_content)
+                if not isinstance(parsed, dict):
+                    return jsonify({
+                        "error": "Invalid JSON structure: document must be a JSON object",
+                        "success": False
+                    }), 400
+                # Try to extract title
+                title = parsed.get('metadata', {}).get('title', '')
+            except orjson.JSONDecodeError as e:
+                return jsonify({
+                    "error": f"Invalid JSON format: {str(e)}",
+                    "success": False
+                }), 400
+            
+        else:
+            # JSON in request body
+            data = request.get_json()
+            if not data:
+                return jsonify({
+                    "error": "No JSON data provided. Use multipart/form-data with 'file' or provide JSON in request body.",
+                    "success": False
+                }), 400
+            
+            # Handle nested "document" key or direct JSON
+            document = data.get('document', data)
+            url = data.get('url', '').strip()  # Optional, metadata only
+            
+            # Validate JSON structure (basic check)
+            if not isinstance(document, dict):
+                return jsonify({
+                    "error": "Invalid JSON structure: document must be a JSON object",
+                    "success": False
+                }), 400
+            
+            # Try to extract title for response
+            try:
+                title = document.get('metadata', {}).get('title', '')
+            except (KeyError, AttributeError):
+                pass
+            
+            # Convert JSON object to binary bytes (as required by index_new_rps)
+            file_content = orjson.dumps(document)
         
-        # TODO: Implement JSON indexing logic
-        # 1. Validate JSON structure
-        # 2. Extract text content
-        # 3. Generate forward index entry
-        # 4. Update inverted index/barrels
-        # 5. Update embeddings (optional)
+        # Validate that we have content
+        if not file_content:
+            return jsonify({
+                "error": "No document content provided",
+                "success": False
+            }), 400
         
-        engine = current_app.config['search_engine']
-        next_id = engine.state.get("last_json_id", 0) + 1
+        # Call the indexing function (url is metadata only, no fetching)
+        doc_id = engine.index_new_rps(file_content, url)
+        
+        # Extract title if not already extracted
+        if not title:
+            try:
+                parsed = orjson.loads(file_content)
+                title = parsed.get('metadata', {}).get('title', '')
+            except (KeyError, AttributeError, orjson.JSONDecodeError):
+                title = ""
         
         return jsonify({
             "success": True,
-            "message": "JSON indexing not yet implemented",
-            "source": source,
-            "assigned_id": f"J{next_id}",
-            "status": "pending"
-        })
+            "doc_id": doc_id,
+            "title": title,
+            "url": url if url else None,
+            "indexed_at": datetime.utcnow().isoformat() + "Z"
+        }), 200
         
     except Exception as e:
         return handle_error(e, "/api/index/json (POST)")
 
 
-@api.route('/index/pdf', methods=['POST'])
-def index_pdf():
-    """
-    Index PDF endpoint - indexes a PDF document.
-    
-    Request Body:
-        - Multipart form with 'file' field containing PDF file (required)
-    
-    Returns:
-        JSON with indexing status and assigned document ID
-    
-    Note: This is a placeholder endpoint. Implementation pending.
-    """
-    try:
-        if 'file' not in request.files:
-            return jsonify({
-                "error": "No file provided. Use 'file' field in multipart form.",
-                "success": False
-            }), 400
-        
-        file = request.files['file']
-        
-        if file.filename == '':
-            return jsonify({
-                "error": "No file selected",
-                "success": False
-            }), 400
-        
-        if not file.filename.lower().endswith('.pdf'):
-            return jsonify({
-                "error": "File must be a PDF",
-                "success": False
-            }), 400
-        
-        # TODO: Implement PDF indexing logic
-        # 1. Save PDF temporarily
-        # 2. Extract text using PDF parser (PyPDF2, pdfminer, etc.)
-        # 3. Generate forward index entry
-        # 4. Update inverted index/barrels
-        # 5. Update embeddings (optional)
-        # 6. Clean up temporary file
-        
-        engine = current_app.config['search_engine']
-        next_id = engine.state.get("last_pdf_id", 0) + 1
-        
-        return jsonify({
-            "success": True,
-            "message": "PDF indexing not yet implemented",
-            "filename": file.filename,
-            "assigned_id": f"P{next_id}",
-            "status": "pending"
-        })
-        
-    except Exception as e:
-        return handle_error(e, "/api/index/pdf (POST)")
 
 
 # ==================== STATUS ENDPOINTS ====================

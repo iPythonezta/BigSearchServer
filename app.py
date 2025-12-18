@@ -116,6 +116,7 @@ def main():
         )
     except KeyboardInterrupt:
         logger.info("BigSearch Server shutting down...")
+        print(f"Systematic Shutdown in progress... Preserving data")
         app.config['search_engine'].shutdown()
 
 

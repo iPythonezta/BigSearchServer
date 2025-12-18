@@ -61,3 +61,5 @@ Thumbs.db
 *.ipynb
 mem_barrels/
 page_rank_dict.json
+
+docs
