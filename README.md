@@ -2,6 +2,8 @@
 
 A Flask-based REST API server for the BigSearch search engine. This server provides endpoints for hybrid search (keyword + semantic), autocomplete suggestions, and document indexing.
 
+Already Deployed at: https://bigsearch.azurewebsites.net/
+
 ## Features
 
 - **Hybrid Search**: Combines keyword-based search with semantic similarity
